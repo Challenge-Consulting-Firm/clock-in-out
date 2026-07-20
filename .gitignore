@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.sample
+.claude/
+infra/.build/
+infra/.terraform/
+infra/*.tfstate
+infra/*.tfstate.*
+infra/.terraform.lock.hcl
+infra/tfplan
+__pycache__/
+*.pyc
+.DS_Store
