@@ -1,10 +1,10 @@
-"""日次バッチ: Teams 2チャネル → Bedrock 構造化 → S3 蓄積。
+"""日次バッチ: Teams 2チャネル → Jev 構造化 → S3 蓄積。
 
 EventBridge Scheduler から毎日起動され:
-  1. SSM から Graph 資格情報を取得しトークン発行
+  1. SSM から Graph 資格情報取得しトークン発行
   2. 打刻用/報告用チャネルの「LOOKBACK_DAYS 日前 00:00 JST 以降」のメッセージを取得
      （delta は使わず投稿日時でフィルタ — 初回に全履歴を拾う問題を避ける）
-  3. 各メッセージを Bedrock Claude(jp.) で構造化（送信者ID を社員キーに採用）
+  3. 各メッセージを TypeSafe Jev で構造化（送信者ID を社員キーに採用）
   4. 正規化済みレコードを S3 に日次 JSONL で蓄積（週次集計の元データ）
 
 環境変数:
@@ -12,7 +12,8 @@ EventBridge Scheduler から毎日起動され:
   GRAPH_SECRET_PARAM     SSM Parameter 名（JSON: {tenant_id, client_id, client_secret}）
   CHANNELS_JSON          [{"role":"clock"|"report","team_id":..,"channel_id":..,"label":..}]
   LOOKBACK_DAYS          取得対象の遡り日数（既定 1 = 前日 00:00 JST 以降）
-  BEDROCK_MODEL_ID       (bedrock_parser 側で参照)
+  TYPESAFE_API_KEY_PARAM Jev API キーの SSM Parameter 名
+  TYPESAFE_MODEL         既定 jev-latest
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 
 import boto3
 
-from bedrock_parser import parse_message
+from jev_parser import parse_message
 from graph_client import extract_plaintext, fetch_messages_and_replies_since, get_token
 
 logger = logging.getLogger()

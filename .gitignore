@@ -11,3 +11,4 @@ infra/tfplan
 __pycache__/
 *.pyc
 .DS_Store
+scripts/.cache/
