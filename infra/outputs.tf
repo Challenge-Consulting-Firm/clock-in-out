@@ -22,3 +22,8 @@ output "teams_webhook_param" {
   description = "Teams webhook URL を投入する SSM Parameter 名"
   value       = aws_ssm_parameter.teams_webhook.name
 }
+
+output "typesafe_api_key_param" {
+  description = "TypeSafe Jev API キーを投入する SSM Parameter 名"
+  value       = aws_ssm_parameter.typesafe_api_key.name
+}

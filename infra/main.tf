@@ -1,11 +1,5 @@
-# 勤怠打刻システム本体: S3 / SSM / IAM(Bedrock jp.限定) / Lambda 2本。
-#
-# 迂回防止（Bedrock 国内完結）の IAM 設計は
-# Challenge-Consulting-Firm/editor-claude-bedrock infra/main.tf を踏襲:
-#   - Allow は (a) jp.* 推論プロファイル と (b) 東京/大阪の foundation-model
-#     （jp.* プロファイル経由の条件付き）のみ
-#   - 明示 Deny で東京/大阪以外のリージョンへの推論呼び出しを拒否
-# これにより Lambda 実行ロールでも jp. 以外の推論は物理的に不可能になる。
+# 勤怠打刻システム本体: S3 / SSM / IAM / Lambda 2本。
+# 構造化は TypeSafe Jev（api.typesafe.ai）。Bedrock 推論プロファイルは残置（切戻し用）。
 
 data "aws_caller_identity" "current" {}
 
@@ -14,12 +8,6 @@ locals {
   jp_profile_arn_patterns = [
     "arn:aws:bedrock:${var.aws_region}:${data.aws_caller_identity.current.account_id}:inference-profile/jp.*",
   ]
-
-  # BEDROCK_MODEL_ID: 明示指定が無ければタグ付きアプリケーション推論プロファイル ARN を使う。
-  # これにより Bedrock 推論コストが Project=clock-in-out タグで Cost Explorer に配賦され、
-  # 他アカウント/他用途の Bedrock 利用と区別できる（オンデマンド課金はリソース非依存のため
-  # この「タグ付きプロファイル経由」が AWS 公式のコスト配賦手段）。
-  bedrock_model_id = var.bedrock_model_id != "" ? var.bedrock_model_id : aws_bedrock_inference_profile.attendance[var.cost_profile_model_key].arn
 }
 
 # ---- S3: 勤怠データ格納 ------------------------------------------------------
@@ -57,6 +45,16 @@ resource "aws_ssm_parameter" "graph_secret" {
   description = "Graph client credentials JSON: {tenant_id, client_id, client_secret}"
   type        = "SecureString"
   value       = "{}" # プレースホルダ。実値は CLI で上書き
+  lifecycle {
+    ignore_changes = [value]
+  }
+}
+
+resource "aws_ssm_parameter" "typesafe_api_key" {
+  name        = "/${var.name_prefix}/typesafe-api-key"
+  description = "TypeSafe Jev API key"
+  type        = "SecureString"
+  value       = "placeholder"
   lifecycle {
     ignore_changes = [value]
   }
@@ -142,7 +140,11 @@ data "aws_iam_policy_document" "lambda_perms" {
   statement {
     sid       = "AllowSsmRead"
     actions   = ["ssm:GetParameter"]
-    resources = [aws_ssm_parameter.graph_secret.arn, aws_ssm_parameter.teams_webhook.arn]
+    resources = [
+      aws_ssm_parameter.graph_secret.arn,
+      aws_ssm_parameter.teams_webhook.arn,
+      aws_ssm_parameter.typesafe_api_key.arn,
+    ]
   }
 }
 
@@ -173,9 +175,10 @@ resource "aws_lambda_function" "ingest" {
     variables = {
       ATTENDANCE_BUCKET  = aws_s3_bucket.attendance.id
       GRAPH_SECRET_PARAM = aws_ssm_parameter.graph_secret.name
-      CHANNELS_JSON      = var.channels_json
-      LOOKBACK_DAYS      = tostring(var.lookback_days)
-      BEDROCK_MODEL_ID   = local.bedrock_model_id
+      CHANNELS_JSON          = var.channels_json
+      LOOKBACK_DAYS          = tostring(var.lookback_days)
+      TYPESAFE_API_KEY_PARAM = aws_ssm_parameter.typesafe_api_key.name
+      TYPESAFE_MODEL         = var.typesafe_model
     }
   }
 }
@@ -192,8 +195,9 @@ resource "aws_lambda_function" "weekly" {
 
   environment {
     variables = {
-      ATTENDANCE_BUCKET = aws_s3_bucket.attendance.id
-      WEBHOOK_PARAM     = aws_ssm_parameter.teams_webhook.name
+      ATTENDANCE_BUCKET   = aws_s3_bucket.attendance.id
+      WEBHOOK_PARAM       = aws_ssm_parameter.teams_webhook.name
+      LEAVE_LOOKBACK_DAYS = tostring(var.leave_lookback_days)
     }
   }
 }

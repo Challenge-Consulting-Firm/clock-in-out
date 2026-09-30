@@ -10,16 +10,10 @@ variable "name_prefix" {
   default     = "clock-in-out"
 }
 
-variable "bedrock_model_id" {
-  description = "勤怠構造化に使うモデル ID の明示上書き。空なら inference-profiles.tf のタグ付き Haiku アプリケーション推論プロファイル ARN を自動使用（コスト配賦のため推奨）。上書きする場合も国内完結のため jp. プレフィックス or application-inference-profile ARN のみ"
+variable "typesafe_model" {
+  description = "勤怠構造化に使う TypeSafe Jev モデル（既定 jev-latest）"
   type        = string
-  default     = ""
-}
-
-variable "cost_profile_model_key" {
-  description = "コスト配賦に使う app_profile_models のキー（inference-profiles.tf）。既定は Haiku"
-  type        = string
-  default     = "haiku-4-5"
+  default     = "jev-latest"
 }
 
 variable "channels_json" {
@@ -31,6 +25,12 @@ variable "lookback_days" {
   description = "日次取り込みで遡る日数（1 = 前日 00:00 JST 以降。delta を使わず投稿日時でフィルタ）"
   type        = number
   default     = 1
+}
+
+variable "leave_lookback_days" {
+  description = "週次集計で事前申請（有給等）を拾うため、対象週より何日前までの正規化 JSONL を読むか"
+  type        = number
+  default     = 21
 }
 
 variable "daily_cron_jst" {

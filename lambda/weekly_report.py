@@ -9,8 +9,9 @@ Markdown 整形の前提（report_usage.py の実測知見を踏襲）:
   → 桁揃えは空白でなく Markdown テーブルで行う
 
 環境変数:
-  ATTENDANCE_BUCKET   勤怠データ S3 バケット
-  WEBHOOK_PARAM       Teams Workflows webhook URL を格納した SSM Parameter 名
+  ATTENDANCE_BUCKET     勤怠データ S3 バケット
+  WEBHOOK_PARAM         Teams Workflows webhook URL を格納した SSM Parameter 名
+  LEAVE_LOOKBACK_DAYS   事前申請（有給等）を拾うため、集計対象週より何日前まで正規化 JSONL を読むか（既定 21）
 """
 
 from __future__ import annotations
@@ -24,7 +25,10 @@ from datetime import datetime, timedelta, timezone
 
 import boto3
 
+from date_extract import merge_target_dates
 from teams import post_teams
+
+_PUNCH_TYPES = {"clock_in", "clock_out", "overtime"}
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -33,6 +37,9 @@ JST = timezone(timedelta(hours=9))
 
 BUCKET = os.environ["ATTENDANCE_BUCKET"]
 WEBHOOK_PARAM = os.environ["WEBHOOK_PARAM"]
+# 有給は数週間前に申請されるため、対象週の JSONL だけでは拾えない。
+# レコードは ingest 実行日（≒投稿日）のファイルに保存され、target_date は申請対象日。
+LEAVE_LOOKBACK_DAYS = int(os.environ.get("LEAVE_LOOKBACK_DAYS", "21"))
 
 s3 = boto3.client("s3")
 ssm = boto3.client("ssm")
@@ -46,7 +53,7 @@ TYPE_LABELS = {
     "clock_out": "退勤",
     "late": "遅刻",
     "early_leave": "早退",
-    "paid_leave": "有給",
+    "paid_leave": "休暇",
     "absence": "欠勤",
     "remote": "在宅",
     "out_of_office": "終日外出",
@@ -67,8 +74,14 @@ def _prev_week_range(today_jst: datetime) -> tuple[datetime, datetime]:
 
 
 def _load_records(start: datetime, end: datetime) -> list[dict]:
+    """対象週のレコードに加え、事前申請を拾うため LEAVE_LOOKBACK_DAYS 日前までの JSONL も読む。
+
+    集約側は target_date で対象週に絞るので、過去ファイルに残った「来週有給」等が
+    表示週のセルに載る。ingest は 05:00 JST 実行のため投稿の翌日ファイルに入ることがあり、
+    1 日分余分に遡る。
+    """
     records = []
-    day = start
+    day = start - timedelta(days=LEAVE_LOOKBACK_DAYS + 1)
     while day <= end:
         key = f"{_NORMALIZED_PREFIX}/{day:%Y/%m/%d}.jsonl"
         try:
@@ -88,7 +101,7 @@ def _load_records(start: datetime, end: datetime) -> list[dict]:
 _STANDALONE_LABELS = {
     "remote": "在宅",
     "out_of_office": "終日外出",
-    "paid_leave": "有給",
+    "paid_leave": "休暇",
     "absence": "欠勤",
 }
 
@@ -144,20 +157,27 @@ def _format_cell_lines(day_records: list[dict]) -> list[str]:
 
 def _aggregate(records: list[dict], start: datetime):
     """employee_name → {date_str → [表示行,...]} に集約（状態／出勤／退勤の3系統に整形）。"""
-    dates = [(start + timedelta(days=i)) for i in range(7)]
-    date_strs = [f"{d:%m/%d}" for d in dates]
-    iso_dates = [f"{d:%Y-%m-%d}" for d in dates]
+    week_days = [(start + timedelta(days=i)) for i in range(7)]
+    date_strs = [f"{d:%m/%d}" for d in week_days]
+    iso_dates = [f"{d:%Y-%m-%d}" for d in week_days]
 
     # まず (emp, col) ごとに、投稿時刻順でレコードを溜める
     grouped: dict[str, dict[str, list[tuple[str, dict]]]] = {}
     for r in records:
         emp = r.get("employee_name") or r.get("employee_id") or "(unknown)"
-        td = r.get("target_date") or ""
-        if td not in iso_dates:
-            continue
-        col = date_strs[iso_dates.index(td)]
+        merged = merge_target_dates(r, r.get("raw_text") or "", r.get("posted_at_jst") or "")
+        target_dates = merged.get("target_dates") or ([merged.get("target_date")] if merged.get("target_date") else [])
         sort_key = r.get("posted_at_jst") or "9999"
-        grouped.setdefault(emp, {}).setdefault(col, []).append((sort_key, r))
+        primary = merged.get("target_date")
+        for td in target_dates:
+            if td not in iso_dates:
+                continue
+            col = date_strs[iso_dates.index(td)]
+            rec = r
+            # 退勤連絡に複数の休暇日が混在する場合、主日付以外は休暇として展開する
+            if r.get("type") in _PUNCH_TYPES and td != primary and len(target_dates) > 1:
+                rec = {**r, "type": "paid_leave", "time": None}
+            grouped.setdefault(emp, {}).setdefault(col, []).append((sort_key, rec))
 
     by_emp: dict[str, dict[str, list[str]]] = {}
     for emp, cols in grouped.items():

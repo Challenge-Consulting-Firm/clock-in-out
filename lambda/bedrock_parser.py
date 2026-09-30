@@ -16,6 +16,8 @@ import os
 
 import boto3
 
+from date_extract import merge_target_dates
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -52,7 +54,7 @@ _SYSTEM_PROMPT = """あなたは勤怠管理アシスタントです。社員が
     （注意: 単なる「直行/直帰」は通常勤務の一部なので out_of_office ではなく clock_in/clock_out）
   - 「営業電話の共有」「〜の件です」等の業務連絡で勤怠に関係しないもの → unknown
 - time は "HH:MM"（24時間）。本文に明示時刻（「10時出社」等）があればそれを使う。無ければ null でよい（当日打刻の time は後処理で投稿時刻から補完する）。
-- target_date はその勤怠が対象とする日付 "YYYY-MM-DD"。明示が無ければ投稿日を使う。翌日/来週など相対表現は投稿日から解決する。「7/16」のような月日表記は投稿年で補完する。
+- target_date は主たる対象日 "YYYY-MM-DD"。複数日（「10日午後休 15日午前休」等）がある場合は最初の日。明示が無ければ投稿日。
 - timing は事前報告なら "advance"、事後報告や当日の打刻・連絡なら "after"、判断できなければ null。
   「明日休みます」「来週有給です」は advance。「おはようございます」「お疲れ様でした」「本日在宅にします」は当日なので after または null。
 - confidence は 0.0〜1.0。勤怠と無関係な雑談・業務連絡は type="unknown" で confidence を低くする。"""
@@ -73,7 +75,11 @@ def _build_user_prompt(text: str, posted_at_jst: str, sender_name: str, channel_
 def parse_message(text: str, posted_at_jst: str, sender_name: str, channel_role: str) -> dict:
     """1件のメッセージを構造化 dict にして返す。失敗時は type=unknown で退避。"""
     if not text or not text.strip():
-        return {"type": "unknown", "time": None, "target_date": posted_at_jst[:10], "timing": None, "confidence": 0.0}
+        return merge_target_dates(
+            {"type": "unknown", "time": None, "target_date": posted_at_jst[:10], "timing": None, "confidence": 0.0},
+            text,
+            posted_at_jst,
+        )
 
     try:
         resp = _bedrock.converse(
@@ -83,10 +89,12 @@ def parse_message(text: str, posted_at_jst: str, sender_name: str, channel_role:
             inferenceConfig={"maxTokens": 512, "temperature": 0.0},
         )
         raw = resp["output"]["message"]["content"][0]["text"].strip()
-        return _coerce(_extract_json(raw), posted_at_jst)
+        parsed = _coerce(_extract_json(raw), posted_at_jst)
+        return merge_target_dates(parsed, text, posted_at_jst)
     except Exception as exc:  # noqa: BLE001 - 1件の失敗で日次全体を止めない
         logger.warning("Bedrock 構造化に失敗（type=unknown で退避）: %s", exc)
-        return {"type": "unknown", "time": None, "target_date": posted_at_jst[:10], "timing": None, "confidence": 0.0}
+        parsed = {"type": "unknown", "time": None, "target_date": posted_at_jst[:10], "timing": None, "confidence": 0.0}
+        return merge_target_dates(parsed, text, posted_at_jst)
 
 
 def _extract_json(raw: str) -> dict:
