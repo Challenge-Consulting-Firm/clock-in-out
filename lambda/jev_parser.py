@@ -20,7 +20,7 @@ from date_extract import merge_target_dates
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-CLOCK_TYPES = ["clock_in", "clock_out", "unknown"]
+CLOCK_TYPES = ["clock_in", "clock_out", "paid_leave", "unknown"]
 REPORT_TYPES = ["late", "early_leave", "paid_leave", "remote", "overtime", "unknown"]
 
 MONTHS = [
