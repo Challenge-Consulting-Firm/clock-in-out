@@ -21,6 +21,7 @@ import io
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 
 import boto3
@@ -82,7 +83,9 @@ def _load_records(start: datetime, end: datetime) -> list[dict]:
     """
     records = []
     day = start - timedelta(days=LEAVE_LOOKBACK_DAYS + 1)
-    while day <= end:
+    # 上限も +1 日。日中の投稿は翌日ファイルに入るため、前週日曜分は当週月曜ファイルにある
+    # （target_date で週に絞るので、翌週分が混ざることはない）。
+    while day <= end + timedelta(days=1):
         key = f"{_NORMALIZED_PREFIX}/{day:%Y/%m/%d}.jsonl"
         try:
             body = s3.get_object(Bucket=BUCKET, Key=key)["Body"].read().decode("utf-8")
@@ -105,6 +108,18 @@ _STANDALONE_LABELS = {
     "absence": "欠勤",
 }
 
+# 半休は type では区別できない（paid_leave 止まり、または退勤連絡に併記される）ため、
+# 本文からコード側で検出して注記する。全日の休みは「休暇」のまま。
+_HALF_DAY_RE = re.compile(r"午前休|午後休|半休")
+
+
+def _half_day_label(day_records: list[dict]) -> str | None:
+    for r in day_records:
+        m = _HALF_DAY_RE.search(r.get("raw_text") or "")
+        if m:
+            return m.group(0)
+    return None
+
 
 def _format_cell_lines(day_records: list[dict]) -> list[str]:
     """同一社員・同一日のレコード群を「状態／出勤／退勤」の表示行に整形する。
@@ -123,14 +138,24 @@ def _format_cell_lines(day_records: list[dict]) -> list[str]:
         return None
 
     lines: list[str] = []
+    half = _half_day_label(day_records)  # 午前休／午後休／半休 or None
 
     # 1) 在席状態（独立行）。重複は除きつつ出現順を保つ
     seen = set()
     for r in day_records:
         lbl = _STANDALONE_LABELS.get(r.get("type"))
-        if lbl and lbl not in seen:
+        if not lbl:
+            continue
+        # 休暇が半休なら「休暇」ではなく午前休／午後休と表示する
+        if r.get("type") == "paid_leave" and half:
+            lbl = half
+        if lbl not in seen:
             seen.add(lbl)
             lines.append(lbl)
+    # 退勤連絡等（clock_out）に半休が併記されていた場合も注記を立てる
+    if half and half not in seen:
+        seen.add(half)
+        lines.append(half)
 
     # 2) 出勤行（遅刻注記）
     in_time = first_time("clock_in") or first_time("late")
